@@ -3,11 +3,15 @@
 import dynamic from "next/dynamic";
 import {
   Children,
+  useCallback,
   useEffect,
+  useId,
   useMemo,
   useRef,
   useState,
   useSyncExternalStore,
+  type CSSProperties,
+  type ReactNode,
 } from "react";
 import {
   IconBrandGithub,
@@ -21,10 +25,10 @@ import {
   IconTrophy,
   IconX,
 } from "@tabler/icons-react";
+import { AsciiScene } from "@/components/ascii-scene";
 import { FloatingDock } from "@/components/ui/floating-dock";
 import { CardBody, CardContainer, CardItem } from "@/components/ui/3d-card";
 import { PointerHighlight } from "@/components/ui/pointer-highlight";
-import { CloudShader } from "@/components/ui/cloud-shader";
 import {
   awards,
   education,
@@ -34,14 +38,34 @@ import {
   skills,
 } from "@/lib/data";
 
+// Both load in their own chunks, after the page itself, so they don't
+// slow down the first paint.
 const IntroTerminal = dynamic(
   () => import("@/components/ui/terminal").then((m) => m.Terminal),
   { ssr: false },
 );
+const CloudShader = dynamic(
+  () => import("@/components/ui/cloud-shader").then((m) => m.CloudShader),
+  { ssr: false },
+);
 
-// Plays on every load and reload. Click Skip (or anywhere) to dismiss early.
-function Splash() {
+const MOTION_QUERY = "(prefers-reduced-motion: reduce)";
+const prefersReducedMotion = () => window.matchMedia(MOTION_QUERY).matches;
+
+// ---------------------------------------------------------------------------
+// Intro splash. Plays on every load and reload; click Skip (or anywhere) to
+// dismiss early. Skipped for people who prefer reduced motion. Calls
+// onReveal as soon as it starts fading, so the page behind can start up.
+function Splash({ onReveal }: { onReveal: () => void }) {
   const [phase, setPhase] = useState<"show" | "fade" | "gone">("show");
+
+  useEffect(() => {
+    if (prefersReducedMotion()) setPhase("gone");
+  }, []);
+
+  useEffect(() => {
+    if (phase !== "show") onReveal();
+  }, [phase, onReveal]);
 
   useEffect(() => {
     document.body.style.overflow = phase === "gone" ? "" : "hidden";
@@ -51,9 +75,10 @@ function Splash() {
   }, [phase]);
 
   useEffect(() => {
+    if (phase !== "show") return;
     const t = setTimeout(() => setPhase("fade"), 4500);
     return () => clearTimeout(t);
-  }, []);
+  }, [phase]);
 
   useEffect(() => {
     if (phase !== "fade") return;
@@ -100,156 +125,21 @@ function Splash() {
 }
 
 // ---------------------------------------------------------------------------
-// Redacted text: every character stays scrambled forever, except the
-// buzzwords below, which decrypt once the text scrolls into view.
-// Edit this list to choose what visitors are allowed to read.
-const BUZZWORDS = [
-  "LLM",
-  "quantization",
-  "Hadamard",
-  "mixed precision",
-  "mixed-precision",
-  "calibration",
-  "low-bit",
-  "integer-only",
-  "W8A8",
-  "inference",
-];
+// Classified internship card.
 
-const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-// Longest first so "mixed precision" wins over shorter overlaps.
-const BUZZ_RE = new RegExp(
-  `\\b(${[...BUZZWORDS]
-    .sort((a, b) => b.length - a.length)
-    .map(escapeRe)
-    .join("|")})`,
-  "gi",
-);
+// Letters and digits only. Symbols like / | \ % $ are line-break
+// opportunities, so flickering them in and out makes the text rewrap and
+// the cards change height (most visible on narrow mobile screens).
+const GLYPHS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
 
-// The buzzwords that actually appear in some text (used for search).
-const buzzwordsIn = (...parts: (string | string[] | undefined)[]) =>
-  parts
-    .flat()
-    .filter((p): p is string => typeof p === "string")
-    .flatMap((p) => p.match(BUZZ_RE) ?? []);
+// Only letters and digits get scrambled. Spaces, hyphens and punctuation
+// stay where they are, so the places a line can break never move.
+const isCipherable = (ch: string) => /[A-Za-z0-9]/.test(ch);
 
-// One shared clock for all redacted text, so there's a single timer.
-let tick = 0;
-let tickTimer: number | undefined;
-const tickListeners = new Set<() => void>();
-const subscribeTick = (cb: () => void) => {
-  tickListeners.add(cb);
-  if (tickTimer === undefined) {
-    tickTimer = window.setInterval(() => {
-      tick += 1;
-      tickListeners.forEach((l) => l());
-    }, 80);
-  }
-  return () => {
-    tickListeners.delete(cb);
-    if (tickListeners.size === 0) {
-      window.clearInterval(tickTimer);
-      tickTimer = undefined;
-    }
-  };
-};
-const useTick = () =>
-  useSyncExternalStore(subscribeTick, () => tick, () => 0);
-
-const MOTION_QUERY = "(prefers-reduced-motion: reduce)";
-const subscribeMotion = (cb: () => void) => {
-  const mq = window.matchMedia(MOTION_QUERY);
-  mq.addEventListener("change", cb);
-  return () => mq.removeEventListener("change", cb);
-};
-const useReducedMotion = () =>
-  useSyncExternalStore(
-    subscribeMotion,
-    () => window.matchMedia(MOTION_QUERY).matches,
-    () => false,
-  );
-
-const GLYPHS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789#$%&*<>/\\|";
-// Deterministic pseudo-random glyph for a character position at a tick,
-// so the server and the first client render match.
-const glyph = (pos: number, t: number) => {
-  let h = Math.imul(pos ^ 0x9e3779b9, 0x85ebca6b) ^ Math.imul(t + 1, 0xc2b2ae35);
-  h ^= h >>> 16;
-  h = Math.imul(h, 0x27d4eb2d);
-  h ^= h >>> 15;
-  return GLYPHS[(h >>> 0) % GLYPHS.length];
-};
-
-function Redacted({ text }: { text: string }) {
-  const ref = useRef<HTMLSpanElement>(null);
-  const now = useTick();
-  const calm = useReducedMotion();
-  const [start, setStart] = useState<number | null>(null);
-  // Even indices are hidden text, odd indices are buzzwords.
-  const parts = useMemo(() => text.split(BUZZ_RE), [text]);
-
-  useEffect(() => {
-    const el = ref.current;
-    if (!el) return;
-    const io = new IntersectionObserver(([entry]) => {
-      if (entry.isIntersecting) {
-        setStart((s) => s ?? tick);
-        io.disconnect();
-      }
-    });
-    io.observe(el);
-    return () => io.disconnect();
-  }, []);
-
-  const scramble = (s: string, from: number, keep: number) =>
-    Array.from(s, (ch, j) =>
-      ch === " " || j < keep ? ch : calm ? "█" : glyph(from + j, now),
-    ).join("");
-
-  let pos = 0;
-  let order = 0;
-  const visible = parts.filter((_, i) => i % 2 === 1);
-
-  return (
-    <span ref={ref} className="font-mono">
-      <span aria-hidden="true">
-        {parts.map((part, i) => {
-          const from = pos;
-          pos += part.length;
-          if (i % 2 === 0) {
-            return (
-              <span key={i} className="text-neutral-700">
-                {scramble(part, from, 0)}
-              </span>
-            );
-          }
-          const delay = 4 + order++ * 4;
-          const shown = calm
-            ? part.length
-            : start === null
-              ? 0
-              : Math.max(0, now - start - delay);
-          return (
-            <span
-              key={i}
-              className="rounded bg-white/10 px-0.5 font-semibold text-white"
-            >
-              {scramble(part, from, shown)}
-            </span>
-          );
-        })}
-      </span>
-      <span className="sr-only">
-        {visible.length > 0 ? `Redacted. Mentions ${visible.join(", ")}.` : "Redacted."}
-      </span>
-    </span>
-  );
-}
-
-// The classified internship "document". Each line mixes numbers (that many
-// characters of permanently scrambled filler) with strings (buzzwords that
-// decrypt and stay readable). No real details are stored anywhere in here,
-// so nothing confidential ends up in the page's JavaScript bundle.
+// Each line mixes numbers (that many characters of permanently scrambled
+// filler) with strings (buzzwords that decrypt and stay readable). No real
+// details are stored in here, so nothing confidential ends up in the
+// page's JavaScript bundle.
 const CLASSIFIED_DOC: (string | number)[][] = [
   [12, "LLM QUANTIZATION", 20],
   [46],
@@ -268,68 +158,90 @@ const CLASSIFIED_KEYWORDS = CLASSIFIED_DOC.flat().filter(
   (seg): seg is string => typeof seg === "string",
 );
 
-const CIPHER = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789#$%&*<>/\\|";
-const randomChar = () => CIPHER[Math.floor(Math.random() * CIPHER.length)];
+// Every segment in one flat list, so each maps to one span on the page.
+const SEGMENTS = CLASSIFIED_DOC.flatMap((line, li) =>
+  line.map((seg, si) => ({ seg, li, si })),
+);
+const LINE_START = CLASSIFIED_DOC.map((_, li) =>
+  CLASSIFIED_DOC.slice(0, li).reduce((n, line) => n + line.length, 0),
+);
+
+const randomChar = () => GLYPHS[(Math.random() * GLYPHS.length) | 0];
+const block = () => "█";
 
 // Filler has a space at fixed positions so it looks like words but never
 // rewraps while it flickers.
 const filler = (length: number, char: () => string) =>
   Array.from({ length }, (_, i) => (i % 6 === 5 ? " " : char())).join("");
 
-const blocks = () => "█";
+const placeholder = (seg: string | number) =>
+  filler(typeof seg === "number" ? seg : seg.length, block);
 
-// One animation frame of the document, `elapsed` ms after it scrolled into view.
-function cipherFrame(elapsed: number) {
-  return CLASSIFIED_DOC.map((line, li) =>
-    line.map((seg, si) => {
-      if (typeof seg === "number") return filler(seg, randomChar);
-      const shown = Math.floor((elapsed - (li * 220 + si * 120)) / 35);
-      return Array.from(seg, (ch, ci) =>
-        ci < shown || ch === " " ? ch : randomChar(),
-      ).join("");
-    }),
-  );
-}
+// The text of every segment, `elapsed` ms after the card came into view.
+const cipherFrame = (elapsed: number) =>
+  SEGMENTS.map(({ seg, li, si }) => {
+    if (typeof seg === "number") return filler(seg, randomChar);
+    const shown = Math.floor((elapsed - (li * 220 + si * 120)) / 35);
+    if (shown >= seg.length) return seg;
+    return Array.from(seg, (ch, ci) =>
+      ci < shown || !isCipherable(ch) ? ch : randomChar(),
+    ).join("");
+  });
 
-// Static version for people who prefer reduced motion: redaction bars plus buzzwords.
+// Static version for reduced motion: redaction bars plus buzzwords.
 const calmFrame = () =>
-  CLASSIFIED_DOC.map((line) =>
-    line.map((seg) => (typeof seg === "number" ? filler(seg, blocks) : seg)),
+  SEGMENTS.map(({ seg }) =>
+    typeof seg === "number" ? filler(seg, block) : seg,
   );
 
 function ClassifiedDoc() {
   const ref = useRef<HTMLDivElement>(null);
-  const [frame, setFrame] = useState<string[][] | null>(null);
+  const spans = useRef<(HTMLSpanElement | null)[]>([]);
 
   useEffect(() => {
     const el = ref.current;
     if (!el) return;
 
-    if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
-      setFrame(calmFrame());
+    // Write straight into the spans instead of going through React state,
+    // so the animation never re-renders the component.
+    const paint = (frame: string[]) =>
+      frame.forEach((text, k) => {
+        const span = spans.current[k];
+        if (span && span.textContent !== text) span.textContent = text;
+      });
+
+    if (prefersReducedMotion()) {
+      paint(calmFrame());
       return;
     }
 
     let start: number | null = null;
-    let timer: number | undefined;
+    let last = 0;
+    let raf = 0;
+
+    // requestAnimationFrame also pauses by itself in background tabs.
+    const loop = (now: number) => {
+      raf = requestAnimationFrame(loop);
+      if (now - last < 70) return;
+      last = now;
+      start ??= now;
+      paint(cipherFrame(now - start));
+    };
 
     // Only animate while the card is on screen.
     const io = new IntersectionObserver(([entry]) => {
-      if (entry.isIntersecting && timer === undefined) {
-        start ??= performance.now();
-        timer = window.setInterval(() => {
-          setFrame(cipherFrame(performance.now() - (start ?? 0)));
-        }, 70);
-      } else if (!entry.isIntersecting && timer !== undefined) {
-        window.clearInterval(timer);
-        timer = undefined;
+      if (entry.isIntersecting) {
+        if (!raf) raf = requestAnimationFrame(loop);
+      } else {
+        cancelAnimationFrame(raf);
+        raf = 0;
       }
     });
     io.observe(el);
 
     return () => {
       io.disconnect();
-      window.clearInterval(timer);
+      cancelAnimationFrame(raf);
     };
   }, []);
 
@@ -354,19 +266,22 @@ function ClassifiedDoc() {
         {CLASSIFIED_DOC.map((line, li) => (
           <p key={li}>
             {line.map((seg, si) => {
-              const text =
-                frame?.[li]?.[si] ??
-                filler(typeof seg === "number" ? seg : seg.length, blocks);
+              const k = LINE_START[li] + si;
               return (
                 <span key={si}>
                   {si > 0 && " "}
-                  {typeof seg === "number" ? (
-                    <span className="text-neutral-700">{text}</span>
-                  ) : (
-                    <span className="rounded bg-white/10 px-1 font-semibold text-white">
-                      {text}
-                    </span>
-                  )}
+                  <span
+                    ref={(node) => {
+                      spans.current[k] = node;
+                    }}
+                    className={
+                      typeof seg === "number"
+                        ? "text-neutral-700"
+                        : "rounded bg-white/10 px-1 font-semibold text-white"
+                    }
+                  >
+                    {placeholder(seg)}
+                  </span>
                 </span>
               );
             })}
@@ -389,34 +304,91 @@ function ClassifiedDoc() {
   );
 }
 
-const display = "font-[family-name:var(--font-grotesk)]";
-
-const matches = (query: string, ...parts: (string | string[])[]) => {
-  const q = query.trim().toLowerCase();
-  if (!q) return true;
-  return parts.flat().join(" ").toLowerCase().includes(q);
-};
+// ---------------------------------------------------------------------------
+// Search. The data never changes, so each entry's searchable text is built
+// once when the page loads instead of on every keystroke.
 
 const isClassifiedExperience = (entry: (typeof experience)[number]) =>
   "classified" in entry && entry.classified === true;
 
+const haystack = (...parts: (string | string[] | undefined)[]) =>
+  parts
+    .flat()
+    .filter((p): p is string => typeof p === "string")
+    .join(" ")
+    .toLowerCase();
+
+const ALL = { experience, projects, education, skills, awards };
+
+const SEARCH_INDEX = {
+  experience: experience.map((e) => ({
+    item: e,
+    text: isClassifiedExperience(e)
+      ? // Only the visible buzzwords are searchable, never the org.
+        haystack(e.role, e.period, CLASSIFIED_KEYWORDS)
+      : haystack(
+          e.period,
+          e.place,
+          e.role,
+          e.org,
+          e.project,
+          e.summary,
+          e.points,
+          e.tags,
+        ),
+  })),
+  projects: projects.map((p) => ({
+    item: p,
+    text: haystack(p.title, p.tags, p.points, p.period),
+  })),
+  education: education.map((e) => ({
+    item: e,
+    text: haystack(e.school, e.detail, e.score, e.extra, e.period),
+  })),
+  skills: skills.map((s) => ({ item: s, text: haystack(s.group, s.items) })),
+  awards: awards.map((a) => ({ item: a, text: haystack(a.title, a.note) })),
+};
+
+function searchIn<T>(list: { item: T; text: string }[], q: string) {
+  return list.filter((entry) => entry.text.includes(q)).map((e) => e.item);
+}
+
+// ---------------------------------------------------------------------------
+// Layout pieces.
+
+const display = "font-[family-name:var(--font-grotesk)]";
+
+const CARD =
+  "relative h-full w-full rounded-[1.75rem] border border-white/10 bg-[#07081a]/75 p-6 md:p-8";
+
+// Phones and tablets can't hover, so the tilt never shows there. They get
+// a plain card instead, which skips the 3D layers and mouse tracking.
+const HOVER_QUERY = "(hover: hover) and (pointer: fine)";
+const subscribeHover = (cb: () => void) => {
+  const mq = window.matchMedia(HOVER_QUERY);
+  mq.addEventListener("change", cb);
+  return () => mq.removeEventListener("change", cb);
+};
+const useCanHover = () =>
+  useSyncExternalStore(
+    subscribeHover,
+    () => window.matchMedia(HOVER_QUERY).matches,
+    () => false,
+  );
+
 // A 3D tilt card. Each direct child floats a little higher than the one
 // before it, so titles, text and tags separate as you hover.
-function TiltCard({
-  children,
-  className = "",
-}: {
-  children: React.ReactNode;
-  className?: string;
-}) {
-  const parts = Children.toArray(children);
+function TiltCard({ children }: { children: ReactNode }) {
+  const canHover = useCanHover();
+
+  if (!canHover) return <div className={CARD}>{children}</div>;
 
   return (
     <CardContainer containerClassName="h-full w-full py-0" className="h-full w-full">
       <CardBody
-        className={`relative h-full w-full rounded-[1.75rem] border border-white/10 bg-neutral-950/80 p-6 backdrop-blur-sm transition-shadow duration-200 hover:shadow-2xl hover:shadow-indigo-500/20 md:p-8 ${className}`}
+        className={`${CARD} transition-shadow duration-200 hover:shadow-2xl hover:shadow-indigo-500/20`}
       >
-        {parts.map((part, i) => (
+        {Children.toArray(children).map((part, i) => (
           <CardItem key={i} translateZ={20 + i * 15} className="w-full">
             {part}
           </CardItem>
@@ -437,24 +409,417 @@ function SectionTitle({ id, children }: { id: string; children: string }) {
   );
 }
 
-function Tag({
-  children,
-  encrypted = false,
-}: {
-  children: string;
-  encrypted?: boolean;
-}) {
+function Tag({ children }: { children: string }) {
   return (
     <span className="rounded-full border border-white/10 bg-white/10 px-3.5 py-1 text-sm font-medium text-neutral-100">
-      {encrypted ? <Redacted text={children} /> : children}
+      {children}
     </span>
   );
 }
 
+// The colour the hero fades into and the rest of the page starts from.
+const SKY = "13,14,38"; // #0d0e26, same as the shader's skyBottomColor
+
+// All the hero's light and shade in one layer, painted once. The first
+// gradient in the list is drawn on top.
+const HERO_LIGHT: CSSProperties = {
+  backgroundImage: [
+    // On top of everything: the bottom eases into the plain sky colour so
+    // it meets the rest of the page with no visible edge. The uneven
+    // steps make an ease-in curve instead of a straight ramp.
+    `linear-gradient(to bottom, rgba(${SKY},0) 50%, rgba(${SKY},0.04) 58%, rgba(${SKY},0.12) 65%, rgba(${SKY},0.26) 72%, rgba(${SKY},0.45) 79%, rgba(${SKY},0.66) 86%, rgba(${SKY},0.84) 93%, rgb(${SKY}) 100%)`,
+    // Moonlight behind the clouds, top right
+    "radial-gradient(circle at 80% 18%, rgba(199,210,254,0.2), transparent 32%)",
+    // Faint indigo glow low on the right
+    "radial-gradient(ellipse at 65% 85%, rgba(99,102,241,0.12), transparent 50%)",
+    // Keep the left side, where the text sits, a touch darker
+    "linear-gradient(to right, rgba(0,0,0,0.55), rgba(0,0,0,0.15) 50%, transparent)",
+    // A little darker at the very top
+    "linear-gradient(to bottom, rgba(0,0,0,0.4), transparent 45%)",
+  ].join(", "),
+};
+
+// The rest of the page continues the night sky from where the hero ends,
+// slowly getting darker towards the bottom, with two faint glows on the way.
+// Both glows sit well below the top edge, so the colour where the page
+// meets the hero is the same flat sky colour all the way across.
+const PAGE_SKY: CSSProperties = {
+  backgroundImage: [
+    "radial-gradient(ellipse 70% 14% at 85% 35%, rgba(99,102,241,0.08), transparent)",
+    "radial-gradient(ellipse 60% 14% at 10% 65%, rgba(129,140,248,0.06), transparent)",
+    "linear-gradient(to bottom, #0d0e26 0%, #0a0b1f 35%, #07071a 70%, #050509 100%)",
+  ].join(", "),
+};
+
+// ---------------------------------------------------------------------------
+// A little silhouette of me (with glasses) working on a laptop with an SDR, sitting on the S of my
+// last name with legs hanging over the front of the letter.
+
+const NAME_WORDS = profile.name.split(" ");
+const LAST_NAME = NAME_WORDS.at(-1) ?? "";
+const FIRST_NAMES = NAME_WORDS.slice(0, -1).join(" ");
+
+const subscribeMotion = (cb: () => void) => {
+  const mq = window.matchMedia(MOTION_QUERY);
+  mq.addEventListener("change", cb);
+  return () => mq.removeEventListener("change", cb);
+};
+const useReducedMotion = () =>
+  useSyncExternalStore(subscribeMotion, prefersReducedMotion, () => false);
+
+// One lower leg, swinging slowly from the knee.
+function Leg({
+  d,
+  knee,
+  begin,
+  swing,
+}: {
+  d: string;
+  knee: string;
+  begin: string;
+  swing: boolean;
+}) {
+  return (
+    <path d={d}>
+      {swing && (
+        <animateTransform
+          attributeName="transform"
+          type="rotate"
+          values={`0 ${knee};-8 ${knee};0 ${knee};3 ${knee};0 ${knee}`}
+          keyTimes="0;0.3;0.55;0.8;1"
+          dur="3.4s"
+          begin={begin}
+          repeatCount="indefinite"
+        />
+      )}
+    </path>
+  );
+}
+
+// The arm is jointed: the upper arm turns at the shoulder and the forearm
+// turns at the elbow. A wave eases the arm up off the keyboard, waves the
+// forearm a couple of times, then eases it back down onto the keys.
+const SHOULDER = "40.5 49.5";
+const ELBOW = "49 61";
+const WAVE_MS = 2600;
+const WAVE_TIMES = "0;0.18;0.32;0.46;0.6;0.72;1";
+// Gentle ease-out going up, smooth back-and-forth, gentle ease-in-out down.
+const WAVE_SPLINES = [
+  "0.3 0 0.2 1",
+  "0.45 0 0.55 1",
+  "0.45 0 0.55 1",
+  "0.45 0 0.55 1",
+  "0.45 0 0.55 1",
+  "0.4 0 0.3 1",
+].join(";");
+const rotations = (angles: number[], centre: string) =>
+  angles.map((a) => `${a} ${centre}`).join(";");
+const SHOULDER_ANGLES = rotations([0, -74, -74, -74, -74, -74, 0], SHOULDER);
+const ELBOW_ANGLES = rotations([0, -26, -40, -12, -40, -26, 0], ELBOW);
+
+// Every arm animation (in both the outline and the filled copy) is marked
+// with data-wave and started from code at the same moment, so the copies
+// always move together.
+function Arm({ wave }: { wave: boolean }) {
+  const timing = {
+    attributeName: "transform",
+    type: "rotate",
+    dur: `${WAVE_MS}ms`,
+    keyTimes: WAVE_TIMES,
+    keySplines: WAVE_SPLINES,
+    calcMode: "spline",
+    fill: "remove",
+    restart: "whenNotActive",
+    begin: "indefinite",
+    "data-wave": "",
+  } as const;
+
+  return (
+    <g>
+      {wave && (
+        <animateTransform {...timing} values={SHOULDER_ANGLES} />
+      )}
+      {/* Upper arm and elbow */}
+      <path d="M37.8 51.6 Q42 58 46.8 63 L51.2 59.4 Q46.4 54.4 43.2 47.6 Z" />
+      <circle cx="49" cy="61" r="2.8" />
+      <g>
+        {wave && (
+          <animateTransform {...timing} values={ELBOW_ANGLES} />
+        )}
+        {/* Forearm and hand */}
+        <path d="M47.6 63.4 L61.2 70.4 L63.2 66.8 L50.2 58.8 Z" />
+        <path d="M60.4 66.2 Q64.6 65.4 65 67.8 Q65 70.6 61.6 70.8 Z" />
+      </g>
+    </g>
+  );
+}
+
+// The whole figure as one shape. It's drawn twice: once as a wide outline
+// and once filled on top, so only the outer edge shows.
+const figureBody = (swing: boolean, wave: boolean) => (
+  <>
+    <path d="M30 79 Q28.5 61 33 49 Q37 42 43 42 Q50 44 51 55 L50 79 Z" />
+    <path d="M40 36 L46 36 L46 44 L40 44 Z" />
+    <circle cx="43.5" cy="30" r="7.6" />
+    <path d="M35.6 31.5 Q34.6 26 36.5 23.6 Q36 21.4 39 21.6 Q41 19.6 44.5 20.6 Q47.5 19.8 49 22.4 Q51.6 24 50.8 27.6 Q47 25.6 42.5 27 Q39.4 28 38.8 33 Z" />
+    <path d="M31 71.5 L62 71.5 Q67 71.5 67 76 L67 80 L31 80 Z" />
+    <Leg
+      d="M54 77 Q55.5 92 57 104.5 L63.5 104.5 Q66.5 107.5 63 109 L53.8 109 Q52 92 49 78 Z"
+      knee="51.5 78"
+      begin="-1.7s"
+      swing={swing}
+    />
+    <Leg
+      d="M60.5 76 Q61.5 94 62.5 108.5 L70.5 108.5 Q74 111.5 70 113.5 L57.5 113.5 Q56.5 95 54.5 78 Z"
+      knee="58 77"
+      begin="0s"
+      swing={swing}
+    />
+    <Arm wave={wave} />
+  </>
+);
+
+// A faint ring rippling off the antenna tip, then a pause.
+function Ripple({ begin }: { begin: string }) {
+  return (
+    <circle
+      cx="81.7"
+      cy="53.2"
+      r="1"
+      fill="none"
+      stroke="#a5b4fc"
+      strokeWidth="0.5"
+      strokeOpacity="0"
+    >
+      <animate
+        attributeName="r"
+        values="1;8;8"
+        keyTimes="0;0.45;1"
+        dur="3.6s"
+        begin={begin}
+        repeatCount="indefinite"
+      />
+      <animate
+        attributeName="stroke-opacity"
+        values="0.7;0;0"
+        keyTimes="0;0.45;1"
+        dur="3.6s"
+        begin={begin}
+        repeatCount="indefinite"
+      />
+    </circle>
+  );
+}
+
+// Sizes are in em, so the figure scales with the headline. The drawing is
+// 56 x 100 units at 0.008em per unit; the seat is 0.288em above the
+// drawing's bottom edge and lines up with the top of the capital S (1cap).
+// To nudge it: change `left` to move sideways, or the 0.288em to move up/down.
+//
+// Hover near him (desktop) or tap him (phones) and he waves.
+function PerchedMe() {
+  const uid = useId().replace(/[^a-zA-Z0-9]/g, "");
+  const glowId = `me-glow-${uid}`;
+  const motion = !useReducedMotion();
+  const svgRef = useRef<SVGSVGElement>(null);
+  const busy = useRef<number | undefined>(undefined);
+
+  // Start one wave; ignore new triggers until it has finished.
+  const startWave = () => {
+    if (!motion || busy.current !== undefined) return;
+    svgRef.current
+      ?.querySelectorAll<SVGAnimationElement>("[data-wave]")
+      .forEach((anim) => anim.beginElement());
+    busy.current = window.setTimeout(() => {
+      busy.current = undefined;
+    }, WAVE_MS);
+  };
+
+  useEffect(() => () => window.clearTimeout(busy.current), []);
+
+  return (
+    <svg
+      ref={svgRef}
+      viewBox="26 16 56 100"
+      aria-hidden="true"
+      focusable="false"
+      className="pointer-events-none absolute left-[0.17em] h-[0.8em] w-[0.448em] overflow-visible bottom-[calc(0.7em-0.288em)] [@supports(top:1cap)]:bottom-[calc(1cap-0.288em)]"
+    >
+      <defs>
+        <radialGradient id={glowId} cx="60" cy="56" r="22" gradientUnits="userSpaceOnUse">
+          <stop offset="0" stopColor="#a5b4fc" stopOpacity="0.55" />
+          <stop offset="1" stopColor="#a5b4fc" stopOpacity="0" />
+        </radialGradient>
+      </defs>
+      {/* Light from the laptop screen */}
+      <circle cx="60" cy="56" r="22" fill={`url(#${glowId})`} />
+      <g
+        fill="none"
+        stroke="#a5b4fc"
+        strokeOpacity="0.45"
+        strokeWidth="1.6"
+        strokeLinejoin="round"
+      >
+        {figureBody(motion, motion)}
+      </g>
+      <g fill="#05050f">{figureBody(motion, motion)}</g>
+      {/* Glasses: the arm back to the ear, and a lens lit by the screen */}
+      <path
+        d="M43.8 28.9 L50.2 28.6"
+        fill="none"
+        stroke="#c7d2fe"
+        strokeOpacity="0.75"
+        strokeWidth="0.7"
+        strokeLinecap="round"
+      />
+      <rect
+        x="49.6"
+        y="27.1"
+        width="3.4"
+        height="3.4"
+        rx="1.1"
+        fill="#a5b4fc"
+        fillOpacity="0.35"
+        stroke="#e0e7ff"
+        strokeWidth="0.7"
+      />
+      <path
+        d="M51.2 27.9 L52.1 27.9"
+        stroke="#ffffff"
+        strokeWidth="0.5"
+        strokeLinecap="round"
+      />
+      {/* Laptop */}
+      <path
+        d="M51 69.2 L78 69.2 L78 71.8 L51 71.8 Z"
+        fill="#05050f"
+        stroke="#a5b4fc"
+        strokeOpacity="0.6"
+        strokeWidth="0.6"
+      />
+      <path
+        d="M75.6 70 L69.8 48.6 L72.2 48 L78 69.6 Z"
+        fill="#05050f"
+        stroke="#c7d2fe"
+        strokeOpacity="0.8"
+        strokeWidth="0.6"
+      />
+      {/* SDR dongle in the side of the laptop, with its antenna */}
+      <path
+        d="M80.6 69.6 L81.7 53.2"
+        stroke="#c7d2fe"
+        strokeOpacity="0.75"
+        strokeWidth="0.6"
+        strokeLinecap="round"
+      />
+      <rect
+        x="77.8"
+        y="69.4"
+        width="3.8"
+        height="2"
+        rx="0.5"
+        fill="#05050f"
+        stroke="#a5b4fc"
+        strokeOpacity="0.7"
+        strokeWidth="0.5"
+      />
+      <circle cx="81.7" cy="53.2" r="0.9" fill="#e0e7ff" />
+      {motion && (
+        <>
+          <Ripple begin="0s" />
+          <Ripple begin="0.45s" />
+        </>
+      )}
+      {/* Invisible area around him that listens for hover and taps */}
+      <rect
+        x="24"
+        y="14"
+        width="64"
+        height="102"
+        fill="transparent"
+        pointerEvents="all"
+        onPointerEnter={(e) => {
+          if (e.pointerType === "mouse") startWave();
+        }}
+        onClick={startWave}
+      />
+    </svg>
+  );
+}
+
+const ICON = "h-full w-full text-neutral-300 transition-colors";
+
+// The dock component ships light grey circles and labels, and only switches
+// to dark ones when the visitor's OS is in dark mode. These override its
+// colours from the outside so it always matches the night sky.
+const DOCK_THEME = [
+  // Icon circles: a faint lighter navy, brighter on hover
+  "[&_.bg-gray-200]:bg-white/[0.07]",
+  "[&_a:hover_.bg-gray-200]:bg-white/15",
+  "[&_a:hover_svg]:text-white",
+  // The little name labels that appear on hover
+  "[&_.bg-gray-100]:bg-[#0d0e26]",
+  "[&_.bg-gray-100]:text-neutral-100",
+  "[&_.border-gray-200]:border-white/10",
+  // The pop-out menu on phones
+  "[&_.bg-gray-50]:bg-[#0d0e26]/80",
+  "[&_.bg-gray-50]:backdrop-blur-md",
+].join(" ");
+
+const DOCK_ITEMS = [
+  { title: "Home", href: "#top", icon: <IconHome className={ICON} /> },
+  { title: "Search", href: "#search", icon: <IconSearch className={ICON} /> },
+  {
+    title: "Experience",
+    href: "#experience",
+    icon: <IconBriefcase className={ICON} />,
+  },
+  { title: "Projects", href: "#projects", icon: <IconCode className={ICON} /> },
+  {
+    title: "Education",
+    href: "#education",
+    icon: <IconSchool className={ICON} />,
+  },
+  { title: "Awards", href: "#awards", icon: <IconTrophy className={ICON} /> },
+  {
+    title: "GitHub",
+    href: profile.github,
+    icon: <IconBrandGithub className={ICON} />,
+  },
+  {
+    title: "LinkedIn",
+    href: profile.linkedin.startsWith("http")
+      ? profile.linkedin
+      : `https://${profile.linkedin}`,
+    icon: <IconBrandLinkedin className={ICON} />,
+  },
+  {
+    title: "Email",
+    href: `mailto:${profile.email}`,
+    icon: <IconMail className={ICON} />,
+  },
+];
+
+// ---------------------------------------------------------------------------
+
 export default function Home() {
   const [query, setQuery] = useState("");
   const [searchOpen, setSearchOpen] = useState(false);
+  // The cloud shader starts 2.5 s into the intro (or straight away if the
+  // intro is skipped), so it's already drawing when the hero appears but
+  // isn't competing with the terminal's first few seconds of typing.
+  const [skyOn, setSkyOn] = useState(false);
+  const revealSky = useCallback(() => setSkyOn(true), []);
   const inputRef = useRef<HTMLInputElement>(null);
+
+  // Download the shader's code (and the ASCII scene's) straight away, then
+  // start them at 2.5 s.
+  useEffect(() => {
+    void import("@/components/ui/cloud-shader");
+    void import("@/lib/ascii-scene");
+    const t = setTimeout(() => setSkyOn(true), 2500);
+    return () => clearTimeout(t);
+  }, []);
 
   const closeSearch = () => {
     setSearchOpen(false);
@@ -497,120 +862,74 @@ export default function Home() {
     if (searchOpen) inputRef.current?.focus();
   }, [searchOpen]);
 
-  const shownExperience = useMemo(
+  const q = query.trim().toLowerCase();
+  const searching = q.length > 0;
+
+  const shown = useMemo(
     () =>
-      experience.filter((e) =>
-        isClassifiedExperience(e)
-          ? // Only the visible buzzwords are searchable, never the org.
-            matches(query, e.role, e.period, CLASSIFIED_KEYWORDS)
-          : // The header is public; in the body only buzzwords are searchable.
-            matches(
-              query,
-              e.period,
-              e.place,
-              e.role,
-              e.org,
-              e.project ?? "",
-              buzzwordsIn(e.summary, e.points, e.tags),
-            ),
-      ),
-    [query],
-  );
-
-  const shownProjects = useMemo(
-    () =>
-      projects.filter((p) => matches(query, p.title, p.tags, p.points, p.period)),
-    [query],
-  );
-
-  const shownEducation = useMemo(
-    () =>
-      education.filter((e) =>
-        matches(query, e.school, e.detail, e.score, e.extra ?? "", e.period),
-      ),
-    [query],
-  );
-
-  const shownSkills = useMemo(
-    () => skills.filter((s) => matches(query, s.group, s.items)),
-    [query],
-  );
-
-  const shownAwards = useMemo(
-    () => awards.filter((a) => matches(query, a.title, a.note)),
-    [query],
+      q
+        ? {
+            experience: searchIn(SEARCH_INDEX.experience, q),
+            projects: searchIn(SEARCH_INDEX.projects, q),
+            education: searchIn(SEARCH_INDEX.education, q),
+            skills: searchIn(SEARCH_INDEX.skills, q),
+            awards: searchIn(SEARCH_INDEX.awards, q),
+          }
+        : ALL,
+    [q],
   );
 
   const total =
-    shownExperience.length +
-    shownProjects.length +
-    shownEducation.length +
-    shownSkills.length +
-    shownAwards.length;
-
-  const searching = query.trim().length > 0;
-
-  const icon = "h-full w-full text-black";
-
-  const dockItems = [
-    { title: "Home", href: "#top", icon: <IconHome className={icon} /> },
-    { title: "Search", href: "#search", icon: <IconSearch className={icon} /> },
-    {
-      title: "Experience",
-      href: "#experience",
-      icon: <IconBriefcase className={icon} />,
-    },
-    { title: "Projects", href: "#projects", icon: <IconCode className={icon} /> },
-    {
-      title: "Education",
-      href: "#education",
-      icon: <IconSchool className={icon} />,
-    },
-    { title: "Awards", href: "#awards", icon: <IconTrophy className={icon} /> },
-    {
-      title: "GitHub",
-      href: profile.github,
-      icon: <IconBrandGithub className={icon} />,
-    },
-    {
-      title: "LinkedIn",
-      href: profile.linkedin.startsWith("http")
-        ? profile.linkedin
-        : `https://${profile.linkedin}`,
-      icon: <IconBrandLinkedin className={icon} />,
-    },
-    {
-      title: "Email",
-      href: `mailto:${profile.email}`,
-      icon: <IconMail className={icon} />,
-    },
-  ];
+    shown.experience.length +
+    shown.projects.length +
+    shown.education.length +
+    shown.skills.length +
+    shown.awards.length;
 
   return (
-    <main id="top" className="relative min-h-screen bg-black text-white">
-      <Splash />
+    <main id="top" className="relative min-h-screen bg-[#050509] text-white">
+      <Splash onReveal={revealSky} />
 
       {/* Full-width hero with the cloud shader */}
       {!searching && (
-        <section className="relative z-10 flex min-h-[92vh] w-full items-center overflow-hidden border-b border-white/10 bg-black">
-          {/* Night-sky colours so the white hero text stays readable */}
-          <CloudShader
-            className="absolute inset-0 min-h-0"
-            speed={0.8}
-            count={6}
-            cloudColor="#3d4060"
-            skyTopColor="#050509"
-            skyBottomColor="#16173a"
+        <section className="relative z-10 flex min-h-[92vh] w-full items-center overflow-hidden bg-gradient-to-b from-[#050509] to-[#0d0e26]">
+          {/* Night-sky colours so the white hero text stays readable. The
+              section's own gradient matches the sky until the shader starts. */}
+          {skyOn && (
+            <CloudShader
+              className="absolute inset-0 min-h-0"
+              speed={0.8}
+              count={6}
+              cloudColor="#3d4060"
+              skyTopColor="#050509"
+              skyBottomColor="#0d0e26"
+            />
+          )}
+          <div
+            aria-hidden="true"
+            className="pointer-events-none absolute inset-0"
+            style={HERO_LIGHT}
           />
-          <div className="pointer-events-none absolute inset-0 bg-gradient-to-b from-black/50 via-black/10 to-black" />
-          <div className="relative z-10 mx-auto w-full max-w-6xl px-6 py-28">
-            <p className="mb-4 text-base font-medium text-neutral-300">
+
+          <div className="relative z-10 mx-auto grid w-full max-w-6xl items-center gap-10 px-6 py-20 md:grid-cols-[1.15fr_0.85fr] md:py-24">
+            <div>
+            <p className="mb-3 text-sm font-medium tracking-wide text-neutral-300 md:text-base">
               {profile.location}
             </p>
             <h1
-              className={`${display} text-5xl font-semibold tracking-tight text-white md:text-8xl`}
+              className={`${display} max-w-5xl text-5xl font-semibold leading-[1.02] tracking-tight text-white [text-wrap:balance] md:text-6xl lg:text-7xl`}
             >
-              Hi, I&apos;m {profile.name}.
+              Hi, I&apos;m {FIRST_NAMES}{" "}
+              {/* The last name keeps extra room above it for the figure,
+                  even when it wraps onto its own line on phones. */}
+              <span className="inline-block whitespace-nowrap pt-[0.5em]">
+                {/* Zero-size marker sitting on the baseline, just before
+                    the S; the figure is positioned from here. */}
+                <span className="relative inline-block h-0 w-0 align-baseline">
+                  <PerchedMe />
+                </span>
+                {LAST_NAME}.
+              </span>
             </h1>
             <div className="mt-8 max-w-3xl text-2xl font-semibold tracking-tight text-neutral-100 md:text-3xl">
               I build things at the edge of
@@ -618,13 +937,35 @@ export default function Home() {
                 <span className="px-1">radio signals and software</span>
               </PointerHighlight>
             </div>
-            <p className="mt-8 max-w-2xl text-lg leading-relaxed text-neutral-200">
+            <p className="mt-6 max-w-2xl text-lg leading-relaxed text-neutral-300">
               {profile.role}.
             </p>
+            <div className="mt-10 flex flex-wrap gap-3">
+              <a
+                href="#experience"
+                className="rounded-full bg-white px-6 py-3 text-sm font-semibold text-black transition hover:bg-indigo-100 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-white"
+              >
+                See my work
+              </a>
+              <a
+                href={`mailto:${profile.email}`}
+                className="rounded-full border border-white/25 bg-white/5 px-6 py-3 text-sm font-semibold text-white transition hover:bg-white/15 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-white"
+              >
+                Get in touch
+              </a>
+            </div>
+            </div>
+
+            {/* Fixed-height box so the layout doesn't jump when the scene
+                starts. It sits over the shader, which shows through. */}
+            <div className="relative h-[420px] w-full md:h-[640px]">
+              {skyOn && <AsciiScene lift={1.8} className="h-full w-full" />}
+            </div>
           </div>
         </section>
       )}
 
+      <div style={PAGE_SKY}>
       <div className="relative z-10 mx-auto max-w-6xl px-6 pb-44 pt-24">
         {searching && (
           <p className="mb-10 text-base text-neutral-200">
@@ -635,11 +976,11 @@ export default function Home() {
         )}
 
         {/* Experience */}
-        {shownExperience.length > 0 && (
+        {shown.experience.length > 0 && (
           <section className="mb-24">
             <SectionTitle id="experience">Experience</SectionTitle>
             <div className="grid gap-4">
-              {shownExperience.map((e) =>
+              {shown.experience.map((e) =>
                 isClassifiedExperience(e) ? (
                   <TiltCard key={e.id}>
                     <p className="font-mono text-sm text-neutral-400">
@@ -667,23 +1008,19 @@ export default function Home() {
                       </p>
                     )}
                     <p className="mt-3 text-base leading-relaxed text-neutral-200">
-                      <Redacted text={e.summary} />
+                      {e.summary}
                     </p>
                     {e.points.length > 0 && (
                       <ul className="mt-4 list-disc space-y-2 pl-5 text-base leading-relaxed text-neutral-200">
                         {e.points.map((pt) => (
-                          <li key={pt}>
-                            <Redacted text={pt} />
-                          </li>
+                          <li key={pt}>{pt}</li>
                         ))}
                       </ul>
                     )}
                     {e.tags.length > 0 && (
                       <div className="mt-5 flex flex-wrap gap-2">
                         {e.tags.map((t) => (
-                          <Tag key={t} encrypted>
-                            {t}
-                          </Tag>
+                          <Tag key={t}>{t}</Tag>
                         ))}
                       </div>
                     )}
@@ -695,11 +1032,11 @@ export default function Home() {
         )}
 
         {/* Projects */}
-        {shownProjects.length > 0 && (
+        {shown.projects.length > 0 && (
           <section className="mb-24">
             <SectionTitle id="projects">Projects</SectionTitle>
             <div className="grid gap-4 md:grid-cols-2">
-              {shownProjects.map((p) => (
+              {shown.projects.map((p) => (
                 <TiltCard key={p.id}>
                   <p className="text-sm font-medium text-neutral-300">
                     {p.period}
@@ -724,11 +1061,11 @@ export default function Home() {
         )}
 
         {/* Skills */}
-        {shownSkills.length > 0 && (
+        {shown.skills.length > 0 && (
           <section className="mb-24">
             <SectionTitle id="skills">Skills</SectionTitle>
             <div className="grid gap-4 md:grid-cols-3">
-              {shownSkills.map((s) => (
+              {shown.skills.map((s) => (
                 <TiltCard key={s.id}>
                   <h3 className={`${display} text-lg font-semibold`}>
                     {s.group}
@@ -745,11 +1082,11 @@ export default function Home() {
         )}
 
         {/* Education */}
-        {shownEducation.length > 0 && (
+        {shown.education.length > 0 && (
           <section className="mb-24">
             <SectionTitle id="education">Education</SectionTitle>
             <div className="grid gap-4 md:grid-cols-3">
-              {shownEducation.map((e) => (
+              {shown.education.map((e) => (
                 <TiltCard key={e.id}>
                   <p className="text-sm font-medium text-neutral-300">
                     {e.period}
@@ -777,11 +1114,11 @@ export default function Home() {
         )}
 
         {/* Awards */}
-        {shownAwards.length > 0 && (
+        {shown.awards.length > 0 && (
           <section className="mb-24">
             <SectionTitle id="awards">Awards</SectionTitle>
             <div className="grid gap-4 md:grid-cols-2">
-              {shownAwards.map((a) => (
+              {shown.awards.map((a) => (
                 <TiltCard key={a.id}>
                   <h3 className={`${display} text-lg font-semibold`}>
                     {a.title}
@@ -792,6 +1129,7 @@ export default function Home() {
             </div>
           </section>
         )}
+      </div>
       </div>
 
       {/* Search bar, opened from the dock (or Ctrl/Cmd+K) */}
@@ -826,9 +1164,9 @@ export default function Home() {
       {/* Floating dock */}
       <div className="fixed inset-x-0 bottom-6 z-50 flex justify-center">
         <FloatingDock
-          items={dockItems}
-          desktopClassName="rounded-full border border-white/20 bg-black dark:bg-black shadow-lg shadow-black/60"
-          mobileClassName="fixed bottom-6 right-6"
+          items={DOCK_ITEMS}
+          desktopClassName={`rounded-full border border-white/10 bg-[#0d0e26]/70 dark:bg-[#0d0e26]/70 backdrop-blur-md shadow-lg shadow-black/40 ${DOCK_THEME}`}
+          mobileClassName={`fixed bottom-6 right-6 ${DOCK_THEME}`}
         />
       </div>
     </main>

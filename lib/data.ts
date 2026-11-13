@@ -195,7 +195,7 @@ export const awards: { id: string; title: string; note: string }[] = [
   {
     id: "scholarship",
     title: "Academic Merit Scholarship",
-    note: "Awarded scholarships worth ₹1,00,000 for academic performance, AY 2024-2025 and AY 2025-2026",
+    note: "Awarded scholarships worth ₹1,00,000 for academic performance, AY 2023-2024 and AY 2025-2026",
   },
   {
     id: "wpx",
