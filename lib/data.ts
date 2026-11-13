@@ -56,7 +56,7 @@ export const projects: Project[] = [
   {
     id: "rf-cnn",
     title: "RF Signal Classification using CNN",
-    period: "Dec 2025 – Jan 2026",
+    period: "Dec 2025 - Jan 2026",
     tags: ["Python", "PyTorch", "CNN", "SDR", "IQ", "Spectrogram"],
     points: [
       "Developed an end-to-end CNN pipeline for automated RF signal identification (SSTV, APRS, FSK, Noise).",
@@ -68,7 +68,7 @@ export const projects: Project[] = [
   {
     id: "chat-app",
     title: "Chat App with Real-Time Messaging",
-    period: "Dec 2025 – Jan 2026",
+    period: "Dec 2025 - Jan 2026",
     tags: [
       "MERN",
       "Socket.io",
@@ -104,7 +104,7 @@ export const education: Education[] = [
     school: "Mahindra University",
     detail: "Integrated M.Tech, Computer Science and Engineering",
     score: "GPA 7.4",
-    period: "Aug 2023 – May 2028 (expected)",
+    period: "Aug 2023 - May 2028 (expected)",
     place: "Hyderabad, India",
     extra:
       "Data Structures & Algorithms, Machine Learning, Database Management Systems, Computer Networks, Object Oriented Programming",
@@ -114,7 +114,7 @@ export const education: Education[] = [
     school: "Narayana Junior College",
     detail: "Intermediate, MPC",
     score: "93%",
-    period: "Jun 2021 – May 2023",
+    period: "Jun 2021 - May 2023",
     place: "Hyderabad, India",
   },
   {
@@ -122,7 +122,7 @@ export const education: Education[] = [
     school: "All Saints High School",
     detail: "High School",
     score: "GPA 10.0",
-    period: "Jun 2013 – May 2021",
+    period: "Jun 2013 - May 2021",
     place: "Hyderabad, India",
   },
 ];
