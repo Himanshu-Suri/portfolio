@@ -1,7 +1,7 @@
 import type { Metadata } from "next";
 import { Inter, Space_Grotesk } from "next/font/google";
 import "./globals.css";
-
+import { Analytics } from "@vercel/analytics/next";
 const inter = Inter({
   subsets: ["latin"],
   variable: "--font-inter",
@@ -30,6 +30,7 @@ export default function RootLayout({
     >
       <body className={`${inter.className} bg-black text-white antialiased`}>
         {children}
+        <Analytics />
       </body>
     </html>
   );
